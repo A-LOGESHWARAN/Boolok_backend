@@ -1,0 +1,24 @@
+# Dependencies — never commit these
+node_modules/
+
+# Environment variables — NEVER commit secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# User uploads (heavy binary files, served from S3 or local disk)
+uploads/posts/*
+uploads/reels/*
+!uploads/posts/.gitkeep
+!uploads/reels/.gitkeep
