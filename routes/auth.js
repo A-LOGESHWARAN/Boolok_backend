@@ -45,58 +45,91 @@ function verifyOtpHelper(email, inputOtp) {
 }
 
 async function sendOtpEmail(toEmail, otp, purpose = 'Account Access') {
-  const user = (process.env.GMAIL_USER || process.env.EMAIL_USER || 'saivimenthanvl@gmail.com').trim();
-  const rawPass = (process.env.GMAIL_APP_PASSWORD || process.env.EMAIL_PASS || '').trim();
-  const pass = rawPass.replace(/\s+/g, ''); // Remove any spaces from Google App Password
+  const resendApiKey = process.env.RESEND_API_KEY;
+  const fromEmail = process.env.GMAIL_USER || 'onboarding@resend.dev';
 
-  if (!pass) {
-    console.warn('[nodemailer] GMAIL_APP_PASSWORD is not set in backend/.env. Email cannot be delivered to Gmail until set.');
+  const htmlBody = `
+    <!DOCTYPE html>
+    <html>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #060b13; color: #ffffff; padding: 24px; margin: 0;">
+      <div style="background-color: #0c1626; border: 1px solid #1a273c; border-radius: 12px; max-width: 480px; margin: 0 auto; padding: 32px; text-align: center;">
+        <div style="font-size: 22px; font-weight: 800; color: #daa520; letter-spacing: 2px; margin-bottom: 6px;">★ BOOLOK AI</div>
+        <div style="font-size: 13px; color: #94a3b8; margin-bottom: 24px;">AI Agent For Real Estate Services</div>
+        <p style="font-size: 15px; color: #cbd5e1; line-height: 1.5; margin-bottom: 20px;">Use the following 6-digit verification code to complete your <strong>${purpose}</strong>:</p>
+        <div style="background: #060b13; border: 1px solid #e6b800; border-radius: 8px; padding: 18px 24px; font-size: 32px; font-weight: 800; letter-spacing: 8px; color: #daa520; display: inline-block; margin-bottom: 24px;">
+          ${otp}
+        </div>
+        <p style="font-size: 13px; color: #94a3b8; line-height: 1.5;">This verification code is valid for <strong>10 minutes</strong>. If you did not request this code, please ignore this email.</p>
+        <div style="font-size: 11px; color: #64748b; margin-top: 30px; border-top: 1px solid #1a273c; padding-top: 16px;">
+          © 2026 Boolok GPT Real Estate Intelligence. All rights reserved.
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  // ── PRIMARY: Resend API (works from Render / cloud hosting) ──────────────
+  if (resendApiKey) {
+    try {
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${resendApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: 'Boolok AI <onboarding@resend.dev>',
+          to: [toEmail],
+          subject: `Your Boolok AI Verification Code: ${otp}`,
+          text: `Your Boolok AI verification code is: ${otp}. This code expires in 10 minutes.`,
+          html: htmlBody,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        console.log(`[resend] OTP email sent to ${toEmail}: ${data.id}`);
+        return true;
+      } else {
+        console.error('[resend] Failed to send email:', JSON.stringify(data));
+      }
+    } catch (err) {
+      console.error('[resend] Error sending email:', err.message);
+    }
+  }
+
+  // ── FALLBACK: Gmail SMTP (for local development) ─────────────────────────
+  const gmailUser = (process.env.GMAIL_USER || '').trim();
+  const rawPass = (process.env.GMAIL_APP_PASSWORD || process.env.EMAIL_PASS || '').trim();
+  const pass = rawPass.replace(/\s+/g, '');
+
+  if (!gmailUser || !pass) {
+    console.warn('[email] Neither RESEND_API_KEY nor GMAIL credentials are configured. OTP email not sent.');
     return false;
   }
 
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    host: 'smtp.gmail.com',
-    port: 465,
-    secure: true,
-    auth: {
-      user,
-      pass,
-    },
-  });
-
-  const mailOptions = {
-    from: `"Boolok AI" <${user}>`,
-    to: toEmail,
-    subject: `Your Boolok AI Verification Code: ${otp}`,
-    text: `Your Boolok AI verification code is: ${otp}. This code expires in 10 minutes.`,
-    html: `
-      <!DOCTYPE html>
-      <html>
-      <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #060b13; color: #ffffff; padding: 24px; margin: 0;">
-        <div style="background-color: #0c1626; border: 1px solid #1a273c; border-radius: 12px; max-width: 480px; margin: 0 auto; padding: 32px; text-align: center;">
-          <div style="font-size: 22px; font-weight: 800; color: #daa520; letter-spacing: 2px; margin-bottom: 6px;">★ BOOLOK AI</div>
-          <div style="font-size: 13px; color: #94a3b8; margin-bottom: 24px;">AI Agent For Real Estate Services</div>
-          <p style="font-size: 15px; color: #cbd5e1; line-height: 1.5; margin-bottom: 20px;">Use the following 6-digit verification code to complete your <strong>${purpose}</strong>:</p>
-          <div style="background: #060b13; border: 1px solid #e6b800; border-radius: 8px; padding: 18px 24px; font-size: 32px; font-weight: 800; letter-spacing: 8px; color: #daa520; display: inline-block; margin-bottom: 24px;">
-            ${otp}
-          </div>
-          <p style="font-size: 13px; color: #94a3b8; line-height: 1.5;">This verification code is valid for <strong>10 minutes</strong>. If you did not request this code, please ignore this email.</p>
-          <div style="font-size: 11px; color: #64748b; margin-top: 30px; border-top: 1px solid #1a273c; padding-top: 16px;">
-            © 2026 Boolok GPT Real Estate Intelligence. All rights reserved.
-          </div>
-        </div>
-      </body>
-      </html>
-    `,
-  };
-
   try {
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`[nodemailer] Verification email successfully delivered to ${toEmail}: ${info.messageId}`);
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      auth: { user: gmailUser, pass },
+    });
+
+    const info = await transporter.sendMail({
+      from: `"Boolok AI" <${gmailUser}>`,
+      to: toEmail,
+      subject: `Your Boolok AI Verification Code: ${otp}`,
+      text: `Your Boolok AI verification code is: ${otp}. This code expires in 10 minutes.`,
+      html: htmlBody,
+    });
+
+    console.log(`[nodemailer] OTP email sent to ${toEmail}: ${info.messageId}`);
     return true;
   } catch (err) {
-    console.error('[nodemailer] Gmail SMTP delivery error:', err.message);
+    console.error('[nodemailer] Gmail SMTP error:', err.message);
     return false;
   }
 }
