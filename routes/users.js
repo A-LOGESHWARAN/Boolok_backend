@@ -1590,18 +1590,59 @@ router.get('/:id', optionalAuth, async (req, res) => {
       return res.status(404).json({ message: 'User not found.' });
     }
 
-    const [postCount, posts] = await Promise.all([
+    const [postCount, dbPosts] = await Promise.all([
       Post.countDocuments({ author: profileUser._id }),
       Post.find({ author: profileUser._id })
-        .populate('author', 'fullName username profilePicture headline')
+        .populate('author', 'fullName username profilePicture headline location email')
+        .populate('comments.user', 'fullName username profilePicture')
         .sort({ createdAt: -1 }),
     ]);
 
     const sanitized = sanitizeUserProfile(profileUser, viewerId);
     const usernameKey = (profileUser.username || '').toLowerCase();
 
-    let userPosts = posts;
-    if (!userPosts || userPosts.length === 0) {
+    const formattedPosts = (dbPosts || []).map((p) => {
+      const likesArray = (p.likes || []).map((l) => (l._id ? l._id.toString() : l.toString()));
+      const isLiked = viewerId ? likesArray.includes(viewerId.toString()) : false;
+      const comments = (p.comments || []).map((c) => ({
+        _id: c._id ? c._id.toString() : undefined,
+        user: c.user,
+        author: c.user,
+        text: c.text,
+        time: c.createdAt ? new Date(c.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now',
+        createdAt: c.createdAt,
+      }));
+
+      return {
+        _id: p._id.toString(),
+        content: p.content || '',
+        title: p.content ? (p.content.length > 50 ? p.content.slice(0, 50) + '...' : p.content) : 'Property Update',
+        mediaUrl: p.mediaUrl || null,
+        image: p.mediaUrl || null,
+        author: p.author
+          ? {
+              _id: p.author._id ? p.author._id.toString() : p.author.toString(),
+              fullName: p.author.fullName || 'Boolok Member',
+              username: p.author.username || 'member',
+              profilePicture: p.author.profilePicture || null,
+              headline: p.author.headline || 'Real Estate Professional',
+              location: p.author.location || 'Global',
+            }
+          : null,
+        likes: likesArray,
+        likesCount: likesArray.length,
+        isLiked,
+        currentUserReaction: isLiked ? 'like' : null,
+        comments,
+        commentsCount: comments.length,
+        createdAt: p.createdAt,
+        updatedAt: p.updatedAt,
+      };
+    });
+
+    let userPosts = formattedPosts;
+    // For non-self community profiles with 0 posts in DB, allow community fallback
+    if (!sanitized.isSelf && userPosts.length === 0) {
       userPosts = COMMUNITY_POSTS_MAP[usernameKey] || [];
       if (userPosts.length === 0) {
         for (const [k, pList] of Object.entries(COMMUNITY_POSTS_MAP)) {
@@ -1622,7 +1663,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
 
     return res.status(200).json({
       user: sanitized,
-      postCount: userPosts.length || postCount,
+      postCount: userPosts.length,
       reelCount: userReels.length,
       followerCount: sanitized.followerCount,
       followingCount: sanitized.followingCount,
@@ -1661,10 +1702,14 @@ router.post('/:id/follow', authMiddleware, async (req, res) => {
     const targetRaw = await User.findById(resolvedUser._id).select('_id fullName username followers');
     if (!targetRaw) return res.status(404).json({ message: 'User not found.' });
 
-    // Step 3: Safe follow-state check — followers are raw ObjectIds
-    const isAlreadyFollowing = (targetRaw.followers || []).some(
-      (f) => (f && (f._id ? f._id.toString() : f.toString())) === viewerId.toString()
-    );
+    // Step 3: Safe follow-state check — check both target followers and viewer following
+    const isAlreadyFollowing =
+      (targetRaw.followers || []).some(
+        (f) => (f && (f._id ? f._id.toString() : f.toString())) === viewerId.toString()
+      ) ||
+      (viewer.following || []).some(
+        (f) => (f && (f._id ? f._id.toString() : f.toString())) === targetRaw._id.toString()
+      );
 
     if (isAlreadyFollowing) {
       // Unfollow — use $pull to atomically remove

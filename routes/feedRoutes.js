@@ -429,6 +429,37 @@ const getReactionsHandler = async (req, res) => {
 router.get('/:id/reactions', authMiddleware, getReactionsHandler);
 router.get('/:id/likes', authMiddleware, getReactionsHandler);
 
+// ── GET /api/feed/user/:userId : Fetch all posts by a specific user ──────────
+router.get('/user/:userId', optionalAuth, async (req, res) => {
+  try {
+    const viewerId = getAuthenticatedUserId(req);
+    const { userId } = req.params;
+
+    let query = {};
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      query = { author: userId };
+    } else {
+      const u = await User.findOne({ username: userId });
+      if (u) {
+        query = { author: u._id };
+      } else {
+        return res.status(200).json({ posts: [] });
+      }
+    }
+
+    const dbPosts = await Post.find(query)
+      .populate('author', 'fullName username profilePicture headline location email')
+      .populate('comments.user', 'fullName username profilePicture')
+      .sort({ createdAt: -1 });
+
+    const formatted = dbPosts.map((p) => formatPost(p, viewerId));
+    return res.status(200).json({ posts: formatted });
+  } catch (error) {
+    console.error('GET USER POSTS ERROR:', error);
+    return res.status(500).json({ message: 'Failed to fetch user posts.', error: error.message });
+  }
+});
+
 // ── GET /api/feed/:id/details : Single post details ──────────────────────────
 router.get('/:id/details', authMiddleware, async (req, res) => {
   try {
