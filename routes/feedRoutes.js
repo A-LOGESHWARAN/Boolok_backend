@@ -35,10 +35,18 @@ const formatPost = (post, viewerId = null) => {
     };
   });
 
+  let resolvedMedia = p.mediaUrl || null;
+  if (resolvedMedia && typeof resolvedMedia === 'string' && resolvedMedia.startsWith('/uploads/')) {
+    const localDiskPath = path.join(__dirname, '..', resolvedMedia);
+    if (!fs.existsSync(localDiskPath)) {
+      resolvedMedia = 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=1200';
+    }
+  }
+
   return {
     _id: p._id.toString(),
-    content: p.content || '',
-    mediaUrl: p.mediaUrl || null,
+    content: (p.content || '').trim() || (resolvedMedia ? 'Exclusive Real Estate Showcase' : ''),
+    mediaUrl: resolvedMedia,
     author: p.author
       ? {
           _id: p.author._id?.toString() || p.author.id?.toString(),
@@ -253,27 +261,19 @@ router.post('/', authMiddleware, upload.single('image'), async (req, res) => {
     if (!userId) return res.status(401).json({ message: 'Authentication required.' });
 
     const content = typeof req.body.content === 'string' ? req.body.content.trim() : '';
-    let mediaUrl = req.file ? `/uploads/posts/${req.file.filename}` : (req.body.mediaUrl || null);
+    let mediaUrl = null;
 
-    // If client sent a base64 image from device, save to disk
-    if (mediaUrl && typeof mediaUrl === 'string' && mediaUrl.startsWith('data:image/')) {
+    if (req.file) {
       try {
-        const matches = mediaUrl.match(/^data:image\/([a-zA-Z0-9+]+);base64,(.+)$/);
-        if (matches) {
-          const rawExt = matches[1].toLowerCase();
-          const ext = rawExt === 'jpeg' ? 'jpg' : rawExt;
-          const buffer = Buffer.from(matches[2], 'base64');
-          const fileName = `device-${Date.now()}-${Math.round(Math.random() * 1e6)}.${ext}`;
-          const uploadDir = path.join(__dirname, '..', 'uploads', 'posts');
-          if (!fs.existsSync(uploadDir)) {
-            fs.mkdirSync(uploadDir, { recursive: true });
-          }
-          fs.writeFileSync(path.join(uploadDir, fileName), buffer);
-          mediaUrl = `/uploads/posts/${fileName}`;
-        }
-      } catch (err) {
-        console.warn('Could not save base64 device image to disk, retaining data URI:', err.message);
+        const fileBuffer = fs.readFileSync(req.file.path);
+        const mime = req.file.mimetype || 'image/jpeg';
+        mediaUrl = `data:${mime};base64,${fileBuffer.toString('base64')}`;
+        try { fs.unlinkSync(req.file.path); } catch (_) {}
+      } catch (readErr) {
+        mediaUrl = `/uploads/posts/${req.file.filename}`;
       }
+    } else if (req.body.mediaUrl && typeof req.body.mediaUrl === 'string') {
+      mediaUrl = req.body.mediaUrl.trim();
     }
 
     if (!content && !mediaUrl) {

@@ -718,7 +718,14 @@ router.post('/avatar', authMiddleware, upload.single('avatar'), async (req, res)
 
     let profilePicture = null;
     if (req.file) {
-      profilePicture = `/uploads/posts/${req.file.filename}`;
+      try {
+        const fileBuffer = fs.readFileSync(req.file.path);
+        const mime = req.file.mimetype || 'image/jpeg';
+        profilePicture = `data:${mime};base64,${fileBuffer.toString('base64')}`;
+        try { fs.unlinkSync(req.file.path); } catch (_) {}
+      } catch (readErr) {
+        profilePicture = `/uploads/posts/${req.file.filename}`;
+      }
     } else if (req.body.avatar && typeof req.body.avatar === 'string') {
       profilePicture = req.body.avatar.trim();
     } else if (req.body.profilePicture && typeof req.body.profilePicture === 'string') {
@@ -733,12 +740,7 @@ router.post('/avatar', authMiddleware, upload.single('avatar'), async (req, res)
       return res.status(400).json({ message: 'Cannot save temporary client blob URI. Please upload as multipart file.' });
     }
 
-    if (profilePicture.startsWith('data:image/')) {
-      const savedPath = saveBase64Image(profilePicture);
-      if (savedPath) {
-        profilePicture = savedPath;
-      }
-    }
+    // Note: profilePicture (including data:image/) is kept directly in MongoDB for permanent persistence across Render restarts.
 
     const updatedUser = await User.findByIdAndUpdate(
       viewerId,
@@ -781,8 +783,7 @@ router.put('/profile', authMiddleware, async (req, res) => {
       if (!profilePicture) {
         updateData.profilePicture = null;
       } else if (typeof profilePicture === 'string' && profilePicture.startsWith('data:image/')) {
-        const savedPath = saveBase64Image(profilePicture);
-        updateData.profilePicture = savedPath || profilePicture;
+        updateData.profilePicture = profilePicture.trim();
       } else if (typeof profilePicture === 'string' && !profilePicture.startsWith('blob:') && !profilePicture.startsWith('file:')) {
         updateData.profilePicture = profilePicture.trim();
       }

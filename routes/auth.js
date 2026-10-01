@@ -552,7 +552,7 @@ router.post('/google', async (req, res) => {
       });
     } else {
       if (googleSubject) user.googleSubject = googleSubject;
-      if (profilePicture) {
+      if (profilePicture && !user.profilePicture) {
         user.profilePicture = profilePicture;
       }
       user.authProvider = 'google';
