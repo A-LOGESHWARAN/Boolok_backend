@@ -231,7 +231,7 @@ const COMMUNITY_MEMBERS = [
   },
   {
     username: 'logeshwarana',
-    aliases: ['logeshwarana', 'logeshwaran_ashok', 'logeshwaran'],
+    aliases: ['logeshwaran_ashok'],
     fullName: 'Logeshwaran A',
     email: 'waranlogesh0406@gmail.com',
     headline: 'Architectural Consultant & Real Estate Lead',
@@ -525,15 +525,14 @@ async function ensureCommunityConnections() {
     // 1. Ensure all community members are in MongoDB with their full details
     const memberDocs = {};
     for (const m of COMMUNITY_MEMBERS) {
-      const lookupQueries = [
-        { username: m.username },
-        { email: m.email },
-      ];
-      if (m.aliases && m.aliases.length > 0) {
-        lookupQueries.push({ username: { $in: m.aliases } });
+      let user = await User.findOne({ email: m.email });
+      if (!user) {
+        user = await User.findOne({ username: m.username });
+      }
+      if (!user && m.aliases && m.aliases.length > 0) {
+        user = await User.findOne({ username: { $in: m.aliases } });
       }
 
-      let user = await User.findOne({ $or: lookupQueries });
       if (!user) {
         user = await User.create({
           fullName: m.fullName,
@@ -551,16 +550,12 @@ async function ensureCommunityConnections() {
         });
       } else {
         let changed = false;
-        if (user.username !== m.username) {
+        if (user.username !== m.username && (!user.email || !user.email.includes('gmail.com'))) {
           user.username = m.username;
           changed = true;
         }
-        if (user.fullName !== m.fullName) {
+        if (user.fullName !== m.fullName && (!user.email || !user.email.includes('gmail.com'))) {
           user.fullName = m.fullName;
-          changed = true;
-        }
-        if (user.email !== m.email && !user.email.includes('gmail.com')) {
-          user.email = m.email;
           changed = true;
         }
         if (user.closedDeals !== (m.closedDeals || '0')) {
@@ -568,27 +563,30 @@ async function ensureCommunityConnections() {
           changed = true;
         }
         if (changed) {
-          await user.save();
+          try {
+            await user.save();
+          } catch (saveErr) {
+            // Ignore duplicate key conflicts during seed update
+          }
         }
       }
       memberDocs[m.username] = user;
     }
 
-    // 2. Establish realistic, verified mutual follower relationships if empty
+    // 2. Establish realistic, verified mutual follower relationships if empty (Only among seed demo accounts, NEVER on real users)
     const INITIAL_FOLLOW_MAP = {
-      shreekutti: ['logeshwarana', 'ajmal', 'saivimenthanvl'],
-      logeshwarana: ['shreekutti', 'ajmal', 'saivimenthanvl'],
-      ajmal: ['shreekutti', 'logeshwarana', 'saivimenthanvl', 'vignesh'],
-      the_akshtr_estate: ['shreekutti', 'logeshwarana', 'saivimenthanvl'],
-      prasanth_properties: ['ajmal', 'bavadharini_rs', 'saivimenthanvl'],
-      bavadharini_rs: ['logeshwarana', 'ajmal', 'saivimenthanvl'],
-      vignesh: ['shreekutti', 'logeshwarana', 'saivimenthanvl'],
-      aswin: ['shreekutti', 'logeshwarana', 'saivimenthanvl'],
-      yashwanth: ['shreekutti', 'logeshwarana', 'saivimenthanvl'],
-      sophia_luxury: ['david_sterling', 'marcus_vance', 'saivimenthanvl'],
-      david_sterling: ['sophia_luxury', 'marcus_vance', 'saivimenthanvl'],
-      marcus_vance: ['sophia_luxury', 'david_sterling', 'saivimenthanvl'],
-      saivimenthanvl: ['shreekutti', 'logeshwarana', 'ajmal'],
+      shreekutti: ['logeshwarana', 'ajmal'],
+      logeshwarana: ['shreekutti', 'ajmal'],
+      ajmal: ['shreekutti', 'logeshwarana', 'vignesh'],
+      the_akshtr_estate: ['shreekutti', 'logeshwarana'],
+      prasanth_properties: ['ajmal', 'bavadharini_rs'],
+      bavadharini_rs: ['logeshwarana', 'ajmal'],
+      vignesh: ['shreekutti', 'logeshwarana'],
+      aswin: ['shreekutti', 'logeshwarana'],
+      yashwanth: ['shreekutti', 'logeshwarana'],
+      sophia_luxury: ['david_sterling', 'marcus_vance'],
+      david_sterling: ['sophia_luxury', 'marcus_vance'],
+      marcus_vance: ['sophia_luxury', 'david_sterling'],
     };
 
     for (const [targetUsername, followerUsernames] of Object.entries(INITIAL_FOLLOW_MAP)) {
@@ -609,6 +607,23 @@ async function ensureCommunityConnections() {
           await User.updateOne({ _id: targetUser._id }, { $addToSet: { followers: { $each: followerIds } } }).catch(() => {});
         }
       }
+    }
+
+    // Clean up any automated dummy links from saivimenthanvl or real users
+    const dummyUsernames = [
+      'shreekutti', 'logeshwarana', 'ajmal', 'the_akshtr_estate',
+      'prasanth_properties', 'bavadharini_rs', 'vignesh', 'aswin',
+      'yashwanth', 'sophia_luxury', 'david_sterling', 'marcus_vance'
+    ];
+    const dummyIds = Object.values(memberDocs)
+      .filter((d) => dummyUsernames.includes(d.username))
+      .map((d) => d._id);
+
+    if (memberDocs['saivimenthanvl']) {
+      await User.updateOne(
+        { _id: memberDocs['saivimenthanvl']._id },
+        { $pull: { following: { $in: dummyIds }, followers: { $in: dummyIds } } }
+      ).catch(() => {});
     }
   } catch (err) {
     console.error('ensureCommunityConnections error:', err);
