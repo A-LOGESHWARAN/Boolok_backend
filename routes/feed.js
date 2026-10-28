@@ -90,17 +90,25 @@ router.get('/', async (req, res) => {
 router.post('/', auth, upload.single('image'), async (req, res) => {
   try {
     const content = typeof req.body.content === 'string' ? req.body.content.trim() : '';
+    const title = typeof req.body.title === 'string' ? req.body.title.trim() : '';
+    const price = typeof req.body.price === 'string' ? req.body.price.trim() : '';
+    const location = typeof req.body.location === 'string' ? req.body.location.trim() : '';
+    const specs = typeof req.body.specs === 'string' ? req.body.specs.trim() : '';
     const mediaUrl = req.file
       ? `/uploads/feed/${req.file.filename}`
       : (typeof req.body.mediaUrl === 'string' ? req.body.mediaUrl.trim() : undefined);
 
-    if (!content && !mediaUrl) {
+    if (!content && !mediaUrl && !title) {
       return res.status(400).json({ message: 'Post content or an image is required.' });
     }
 
     const newPost = new Post({
       author: req.user.id,
       content,
+      title,
+      price,
+      location,
+      specs,
       mediaUrl,
     });
 

@@ -21,6 +21,7 @@ const formatPost = (post, viewerId = null) => {
 
   const comments = (p.comments || []).map((c) => {
     const userObj = c.user || {};
+    const createdDate = c.createdAt || new Date();
     return {
       _id: c._id,
       author: {
@@ -29,9 +30,16 @@ const formatPost = (post, viewerId = null) => {
         username: userObj.username || 'member',
         profilePicture: userObj.profilePicture || null,
       },
+      user: {
+        _id: userObj._id || userObj.id || null,
+        fullName: userObj.fullName || 'Boolok Member',
+        username: userObj.username || 'member',
+        profilePicture: userObj.profilePicture || null,
+      },
       text: c.text,
-      createdAt: c.createdAt,
-      time: c.createdAt ? new Date(c.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Recently',
+      createdAt: createdDate,
+      time: new Date(createdDate).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      date: new Date(createdDate).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }),
     };
   });
 

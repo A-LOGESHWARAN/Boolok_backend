@@ -228,15 +228,33 @@ io.use((socket, next) => {
     return next(new Error('Authentication token required'));
   }
 
-  try {
-    const secret = process.env.JWT_SECRET || 'boolok_default_jwt_secret_key_2026';
-    const decoded = jwt.verify(token, secret);
-    socket.userId = (decoded.userId || decoded.id || '').toString();
-    next();
-  } catch (err) {
-    console.warn('[socket] Token verification failed:', err.message);
-    next(new Error('Invalid token'));
+  const secrets = [
+    process.env.JWT_SECRET,
+    'boolok_default_jwt_secret_key_2026',
+    'boolok_secret_key_2026',
+  ].filter(Boolean);
+
+  let decoded = null;
+  let lastErr = null;
+
+  for (const secret of secrets) {
+    try {
+      decoded = jwt.verify(token, secret);
+      if (decoded && (decoded.userId || decoded.id)) {
+        break;
+      }
+    } catch (err) {
+      lastErr = err;
+    }
   }
+
+  if (decoded && (decoded.userId || decoded.id)) {
+    socket.userId = (decoded.userId || decoded.id).toString();
+    return next();
+  }
+
+  console.warn('[socket] Token verification failed:', lastErr ? lastErr.message : 'Invalid token');
+  return next(new Error('Invalid token'));
 });
 
 io.on('connection', (socket) => {

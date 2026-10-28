@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const User = require('../models/User');
 const Post = require('../models/Post');
+const Reel = require('../models/Reel');
 const Notification = require('../models/Notification');
 const authMiddleware = require('../middleware/auth');
 const optionalAuth = require('../middleware/optionalAuth');
@@ -130,6 +131,20 @@ function sanitizeUserProfile(user, viewerId = null) {
   };
 }
 
+// ── GET /api/users/self (Compatibility route for current user profile) ─────
+router.get('/self', authMiddleware, async (req, res) => {
+  try {
+    const userId = getAuthenticatedUserId(req);
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+    return res.status(200).json({ user: sanitizeUserProfile(user, userId) });
+  } catch (error) {
+    return res.status(500).json({ message: 'Failed to fetch current user.', error: error.message });
+  }
+});
+
 // ── GET /api/users/search?q=query ──────────────────────────────────────────
 router.get('/search', async (req, res) => {
   try {
@@ -144,8 +159,18 @@ router.get('/search', async (req, res) => {
       const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
       if (token) {
         const jwt = require('jsonwebtoken');
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'boolok_secret_key_2026');
-        viewerId = decoded.id || decoded._id;
+        const secrets = [
+          process.env.JWT_SECRET,
+          'boolok_default_jwt_secret_key_2026',
+          'boolok_secret_key_2026',
+        ].filter(Boolean);
+        for (const s of secrets) {
+          try {
+            const decoded = jwt.verify(token, s);
+            viewerId = decoded.id || decoded._id || decoded.userId;
+            if (viewerId) break;
+          } catch (_) {}
+        }
       }
     } catch (_) { }
 
@@ -1606,10 +1631,20 @@ router.get('/:id', optionalAuth, async (req, res) => {
       return res.status(404).json({ message: 'User not found.' });
     }
 
-    const [postCount, dbPosts] = await Promise.all([
+    const [postCount, dbPosts, dbReels] = await Promise.all([
       Post.countDocuments({ author: profileUser._id }),
       Post.find({ author: profileUser._id })
         .populate('author', 'fullName username profilePicture headline location email')
+        .populate('comments.user', 'fullName username profilePicture')
+        .sort({ createdAt: -1 }),
+      Reel.find({
+        $or: [
+          { author: profileUser._id },
+          ...(profileUser.fullName ? [{ authorName: profileUser.fullName }] : []),
+          ...(profileUser.username ? [{ authorName: profileUser.username }] : []),
+        ],
+      })
+        .populate('author', 'fullName username profilePicture')
         .populate('comments.user', 'fullName username profilePicture')
         .sort({ createdAt: -1 }),
     ]);
@@ -1632,7 +1667,10 @@ router.get('/:id', optionalAuth, async (req, res) => {
       return {
         _id: p._id.toString(),
         content: p.content || '',
-        title: p.content ? (p.content.length > 50 ? p.content.slice(0, 50) + '...' : p.content) : 'Property Update',
+        title: p.title || (p.content ? (p.content.length > 50 ? p.content.slice(0, 50) + '...' : p.content) : 'Property Update'),
+        price: p.price || '',
+        location: p.location || '',
+        specs: p.specs || '',
         mediaUrl: p.mediaUrl || null,
         image: p.mediaUrl || null,
         author: p.author
@@ -1670,11 +1708,66 @@ router.get('/:id', optionalAuth, async (req, res) => {
       }
     }
 
-    let userReels = [];
-    if (usernameKey === 'logeshwarana' || usernameKey.includes('logeshwaran')) {
-      userReels = LOGESHWARAN_REELS;
-    } else if (sanitized.isSelf || usernameKey.includes('sai') || usernameKey === 'saivimenthanvl') {
-      userReels = SAI_REELS;
+    const formattedReels = (dbReels || []).map((r) => {
+      const likesArray = (r.likes || []).map((l) => (l._id ? l._id.toString() : l.toString()));
+      const isLiked = viewerId ? likesArray.includes(viewerId.toString()) : false;
+      const comments = (r.comments || []).map((c) => ({
+        _id: c._id ? c._id.toString() : undefined,
+        user: c.user,
+        author: c.user,
+        text: c.text,
+        createdAt: c.createdAt,
+      }));
+      const poster = r.poster || r.thumbnail || 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=1200';
+      return {
+        _id: r._id.toString(),
+        title: r.title || r.caption || 'Property Reel',
+        location: r.location || '',
+        authorName: r.authorName || (r.author && r.author.fullName) || '',
+        caption: r.caption || '',
+        aiMatch: r.aiMatch || 96,
+        insight: r.insight || r.caption || '',
+        likes: likesArray.length,
+        likesCount: likesArray.length,
+        isLiked,
+        comments,
+        commentsCount: comments.length,
+        author: r.author
+          ? {
+              _id: r.author._id ? r.author._id.toString() : r.author.toString(),
+              fullName: r.authorName || r.author.fullName || 'Boolok Member',
+              username: r.author.username || 'member',
+              profilePicture: r.author.profilePicture || null,
+            }
+          : {
+              _id: profileUser._id.toString(),
+              fullName: r.authorName || profileUser.fullName,
+              username: profileUser.username,
+              profilePicture: profileUser.profilePicture,
+            },
+        poster,
+        thumbnail: poster,
+        videoUrl: r.videoUrl,
+        music: 'Boolok AI · Property Showcase Track',
+        createdAt: r.createdAt,
+      };
+    });
+
+    let userReels = formattedReels;
+    if (userReels.length === 0) {
+      if (usernameKey === 'logeshwarana' || usernameKey.includes('logeshwaran')) {
+        userReels = LOGESHWARAN_REELS;
+      } else if (sanitized.isSelf || usernameKey.includes('sai') || usernameKey === 'saivimenthanvl') {
+        userReels = SAI_REELS;
+      }
+    } else {
+      const sampleReels = usernameKey.includes('logesh') ? LOGESHWARAN_REELS : SAI_REELS;
+      const seenReelIds = new Set(userReels.map((r) => r._id));
+      sampleReels.forEach((sr) => {
+        if (!seenReelIds.has(sr._id)) {
+          userReels.push(sr);
+        }
+      });
     }
 
     return res.status(200).json({

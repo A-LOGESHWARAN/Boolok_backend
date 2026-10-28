@@ -24,8 +24,8 @@ const upload = multer({
   storage,
   limits: { fileSize: 200 * 1024 * 1024 }, // 200 MB
   fileFilter: (_req, file, cb) => {
-    if (file.mimetype.startsWith('video/')) cb(null, true);
-    else cb(new Error('Only video files are allowed'));
+    if (file.mimetype.startsWith('video/') || file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Only video and image files are allowed'));
   },
 });
 
@@ -50,8 +50,15 @@ const formatReel = (reel, viewerId = null) => {
 
   const comments = (r.comments || []).map((c) => {
     const u = c.user || {};
+    const createdDate = c.createdAt || new Date();
     return {
       _id: c._id,
+      user: {
+        _id: u._id || u.id || null,
+        fullName: u.fullName || 'Boolok Member',
+        username: u.username || 'member',
+        profilePicture: u.profilePicture || null,
+      },
       author: {
         _id: u._id || u.id || null,
         fullName: u.fullName || 'Boolok Member',
@@ -59,23 +66,38 @@ const formatReel = (reel, viewerId = null) => {
         profilePicture: u.profilePicture || null,
       },
       text: c.text,
-      createdAt: c.createdAt,
+      createdAt: createdDate,
+      time: new Date(createdDate).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      date: new Date(createdDate).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }),
     };
   });
+
+  const poster = r.poster || r.thumbnail || null;
+  const thumbnail = r.thumbnail || r.poster || null;
+
+  const authorDisplayName = r.authorName || r.author?.fullName || 'Boolok Member';
 
   return {
     _id: r._id.toString(),
     author: r.author
       ? {
           _id: r.author._id?.toString() || r.author.id?.toString(),
-          fullName: r.author.fullName || 'Boolok Member',
+          fullName: authorDisplayName,
           username: r.author.username || 'member',
           profilePicture: r.author.profilePicture || null,
         }
-      : null,
+      : {
+          _id: null,
+          fullName: authorDisplayName,
+          username: 'member',
+          profilePicture: null,
+        },
     videoUrl: r.videoUrl,
+    poster,
+    thumbnail,
     caption: r.caption || '',
     title: r.title || '',
+    authorName: r.authorName || '',
     location: r.location || '',
     aiMatch: r.aiMatch,
     insight: r.insight,
@@ -107,25 +129,48 @@ router.get('/', optionalAuth, async (req, res) => {
 });
 
 // ── POST /api/reels : Create a new reel ──────────────────────────────────────
-router.post('/', auth, upload.single('video'), async (req, res) => {
+router.post('/', auth, upload.any(), async (req, res) => {
   try {
+    const files = req.files || [];
+    const videoFile = files.find(
+      (f) => f.fieldname === 'video' || (f.mimetype && f.mimetype.startsWith('video/'))
+    );
+    const thumbFile = files.find(
+      (f) =>
+        f.fieldname === 'thumbnail' ||
+        f.fieldname === 'poster' ||
+        (f.mimetype && f.mimetype.startsWith('image/'))
+    );
+
     let videoUrl;
-    if (req.file) {
-      videoUrl = `/uploads/reels/${req.file.filename}`;
+    if (videoFile) {
+      videoUrl = `/uploads/reels/${videoFile.filename}`;
     } else if (typeof req.body.videoUrl === 'string' && req.body.videoUrl.trim()) {
       videoUrl = req.body.videoUrl.trim();
     } else {
       return res.status(400).json({ message: 'A video file or video URL is required.' });
     }
 
-    const { caption, title, location } = req.body;
+    let thumbnail = null;
+    if (thumbFile) {
+      thumbnail = `/uploads/reels/${thumbFile.filename}`;
+    } else if (typeof req.body.thumbnail === 'string' && req.body.thumbnail.trim()) {
+      thumbnail = req.body.thumbnail.trim();
+    } else if (typeof req.body.poster === 'string' && req.body.poster.trim()) {
+      thumbnail = req.body.poster.trim();
+    }
+
+    const { caption, title, location, authorName } = req.body;
     const placeholder = generatePlaceholderAnalysis();
 
     const newReel = new Reel({
       author: req.user.id,
       videoUrl,
+      thumbnail: thumbnail || null,
+      poster: thumbnail || null,
       caption: caption || '',
       title: title || '',
+      authorName: authorName ? authorName.trim() : '',
       location: location || '',
       aiMatch: req.body.aiMatch ? Number(req.body.aiMatch) : placeholder.aiMatch,
       insight: req.body.insight ? req.body.insight.trim() : placeholder.insight,
@@ -211,12 +256,29 @@ router.get('/:id/comments', optionalAuth, async (req, res) => {
       .populate('comments.user', 'fullName username profilePicture');
     if (!reel) return res.status(404).json({ message: 'Reel not found.' });
 
-    const comments = (reel.comments || []).map((c) => ({
-      _id: c._id,
-      author: c.user || { fullName: 'Boolok Member', username: 'member' },
-      text: c.text,
-      createdAt: c.createdAt,
-    }));
+    const comments = (reel.comments || []).map((c) => {
+      const u = c.user || {};
+      const createdDate = c.createdAt || new Date();
+      return {
+        _id: c._id,
+        user: {
+          _id: u._id || u.id || null,
+          fullName: u.fullName || 'Boolok Member',
+          username: u.username || 'member',
+          profilePicture: u.profilePicture || null,
+        },
+        author: {
+          _id: u._id || u.id || null,
+          fullName: u.fullName || 'Boolok Member',
+          username: u.username || 'member',
+          profilePicture: u.profilePicture || null,
+        },
+        text: c.text,
+        createdAt: createdDate,
+        time: new Date(createdDate).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        date: new Date(createdDate).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }),
+      };
+    });
     res.json(comments);
   } catch (error) {
     console.error('GET REEL COMMENTS ERROR:', error);
