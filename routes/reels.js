@@ -13,10 +13,17 @@ const uploadDir = path.join(__dirname, '..', 'uploads', 'reels');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadDir),
+  destination: (_req, _file, cb) => {
+    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+    cb(null, uploadDir);
+  },
   filename: (_req, file, cb) => {
     const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    cb(null, `${unique}${path.extname(file.originalname)}`);
+    let rawExt = path.extname(file.originalname || '').toLowerCase().replace(/[^a-z0-9.]/g, '');
+    if (!rawExt || rawExt.length > 5 || rawExt.includes('/')) {
+      rawExt = (file.mimetype && file.mimetype.startsWith('image/')) ? '.jpg' : '.mp4';
+    }
+    cb(null, `${unique}${rawExt}`);
   },
 });
 
@@ -24,8 +31,20 @@ const upload = multer({
   storage,
   limits: { fileSize: 200 * 1024 * 1024 }, // 200 MB
   fileFilter: (_req, file, cb) => {
-    if (file.mimetype.startsWith('video/') || file.mimetype.startsWith('image/')) cb(null, true);
-    else cb(new Error('Only video and image files are allowed'));
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    const isVideoExt = ['.mp4', '.mov', '.webm', '.m4v', '.mkv', '.avi'].includes(ext);
+    const isImageExt = ['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext);
+    const isMediaMime =
+      !file.mimetype ||
+      file.mimetype.startsWith('video/') ||
+      file.mimetype.startsWith('image/') ||
+      file.mimetype === 'application/octet-stream';
+
+    if (isMediaMime || isVideoExt || isImageExt) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only video and image files are allowed'));
+    }
   },
 });
 
@@ -131,23 +150,36 @@ router.get('/', optionalAuth, async (req, res) => {
 // ── POST /api/reels : Create a new reel ──────────────────────────────────────
 router.post('/', auth, upload.any(), async (req, res) => {
   try {
-    const files = req.files || [];
+    const files = req.files || (req.file ? [req.file] : []);
+    console.log(`[reels] Upload request from user ${req.user?.id}, received ${files.length} file(s)`);
+
     const videoFile = files.find(
-      (f) => f.fieldname === 'video' || (f.mimetype && f.mimetype.startsWith('video/'))
-    );
-    const thumbFile = files.find(
       (f) =>
-        f.fieldname === 'thumbnail' ||
-        f.fieldname === 'poster' ||
-        (f.mimetype && f.mimetype.startsWith('image/'))
+        f.fieldname === 'video' ||
+        f.fieldname === 'file' ||
+        (f.mimetype && f.mimetype.startsWith('video/')) ||
+        (f.originalname && /\.(mp4|mov|webm|m4v|mkv|avi)$/i.test(f.originalname)) ||
+        (files.length === 1 && (!f.mimetype || !f.mimetype.startsWith('image/')))
     );
 
-    let videoUrl;
+    const thumbFile = files.find(
+      (f) =>
+        f !== videoFile &&
+        (f.fieldname === 'thumbnail' ||
+          f.fieldname === 'poster' ||
+          (f.mimetype && f.mimetype.startsWith('image/')) ||
+          (f.originalname && /\.(jpg|jpeg|png|webp)$/i.test(f.originalname)))
+    );
+
+    let videoUrl = null;
     if (videoFile) {
       videoUrl = `/uploads/reels/${videoFile.filename}`;
     } else if (typeof req.body.videoUrl === 'string' && req.body.videoUrl.trim()) {
       videoUrl = req.body.videoUrl.trim();
+    } else if (typeof req.body.video === 'string' && req.body.video.trim()) {
+      videoUrl = req.body.video.trim();
     } else {
+      console.warn('[reels] Missing video. Body:', Object.keys(req.body));
       return res.status(400).json({ message: 'A video file or video URL is required.' });
     }
 
@@ -168,22 +200,23 @@ router.post('/', auth, upload.any(), async (req, res) => {
       videoUrl,
       thumbnail: thumbnail || null,
       poster: thumbnail || null,
-      caption: caption || '',
-      title: title || '',
-      authorName: authorName ? authorName.trim() : '',
-      location: location || '',
+      caption: caption ? String(caption).trim() : '',
+      title: title ? String(title).trim() : '',
+      authorName: authorName ? String(authorName).trim() : '',
+      location: location ? String(location).trim() : '',
       aiMatch: req.body.aiMatch ? Number(req.body.aiMatch) : placeholder.aiMatch,
-      insight: req.body.insight ? req.body.insight.trim() : placeholder.insight,
+      insight: req.body.insight ? String(req.body.insight).trim() : placeholder.insight,
       likes: [],
       comments: [],
     });
 
     const savedReel = await newReel.save();
     await savedReel.populate('author', 'fullName username profilePicture');
+    console.log(`[reels] Successfully created reel: ${savedReel._id}`);
     res.status(201).json(formatReel(savedReel, req.user.id));
   } catch (error) {
     console.error('CREATE REEL ERROR:', error);
-    res.status(500).json({ message: 'Server error creating reel' });
+    res.status(500).json({ message: 'Server error creating reel', error: error.message });
   }
 });
 
