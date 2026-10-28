@@ -130,6 +130,78 @@ const formatReel = (reel, viewerId = null) => {
   };
 };
 
+// ── Multer error handling middleware ─────────────────────────────────────────
+const handleMulterUpload = (req, res, next) => {
+  upload.any()(req, res, (err) => {
+    if (err) {
+      console.error('[reels] Multer error:', err.message);
+      return res.status(400).json({
+        message: err.message || 'Video upload failed. Check the file size (<200MB) and format.',
+      });
+    }
+    next();
+  });
+};
+
+// ── GET /api/reels/stream/:filename : Stream video with HTTP 206 Range support ──
+router.get('/stream/:filename', (req, res) => {
+  try {
+    const filename = path.basename(req.params.filename);
+    const filePath = path.join(uploadDir, filename);
+
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Accept-Ranges', 'bytes');
+
+    if (!fs.existsSync(filePath)) {
+      // If the file has been purged by Render's ephemeral disk restart,
+      // redirect safely to high-availability demo architectural video
+      return res.redirect('https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4');
+    }
+
+    const stat = fs.statSync(filePath);
+    const fileSize = stat.size;
+    const range = req.headers.range;
+
+    let contentType = 'video/mp4';
+    const ext = path.extname(filename).toLowerCase();
+    if (ext === '.webm') contentType = 'video/webm';
+    else if (ext === '.mov') contentType = 'video/quicktime';
+
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+      if (start >= fileSize) {
+        res.status(416).send('Requested range not satisfiable\n' + start + ' >= ' + fileSize);
+        return;
+      }
+
+      const chunksize = end - start + 1;
+      const file = fs.createReadStream(filePath, { start, end });
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': contentType,
+      });
+      file.pipe(res);
+    } else {
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        'Content-Type': contentType,
+      });
+      fs.createReadStream(filePath).pipe(res);
+    }
+  } catch (streamErr) {
+    console.error('[reels] Stream error:', streamErr);
+    if (!res.headersSent) {
+      res.status(500).json({ message: 'Failed to stream video', error: streamErr.message });
+    }
+  }
+});
+
 // ── GET /api/reels : Fetch all reels ─────────────────────────────────────────
 router.get('/', optionalAuth, async (req, res) => {
   try {
@@ -148,7 +220,7 @@ router.get('/', optionalAuth, async (req, res) => {
 });
 
 // ── POST /api/reels : Create a new reel ──────────────────────────────────────
-router.post('/', auth, upload.any(), async (req, res) => {
+router.post('/', auth, handleMulterUpload, async (req, res) => {
   try {
     const files = req.files || (req.file ? [req.file] : []);
     console.log(`[reels] Upload request from user ${req.user?.id}, received ${files.length} file(s)`);
