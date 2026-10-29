@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
 
 const User = require('../models/User');
+const Otp = require('../models/Otp');
 const authMiddleware = require('../middleware/auth');
 
 const router = express.Router();
@@ -18,30 +19,127 @@ function generateOtp() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-function storeOtp(email, otp) {
-  const normalizedEmail = email.trim().toLowerCase();
-  otpStore.set(normalizedEmail, {
-    otp: String(otp),
+async function storeOtp(target, otp, type = 'register') {
+  const norm = String(target).trim().toLowerCase();
+  otpStore.set(norm, {
+    otp: String(otp).trim(),
     expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
   });
+
+  try {
+    await Otp.deleteMany({ target: norm });
+    await Otp.create({ target: norm, otp: String(otp).trim(), type });
+  } catch (err) {
+    console.warn('[otp] MongoDB Otp storage fallback to memory:', err.message);
+  }
 }
 
-function verifyOtpHelper(email, inputOtp) {
-  const normalizedEmail = email.trim().toLowerCase();
-  const entry = otpStore.get(normalizedEmail);
+async function verifyOtpHelper(target, inputOtp) {
+  const norm = String(target).trim().toLowerCase();
+  const code = String(inputOtp).trim();
 
-  if (!entry) return false;
-  if (Date.now() > entry.expiresAt) {
-    otpStore.delete(normalizedEmail);
-    return false;
-  }
-
-  if (entry.otp === String(inputOtp).trim()) {
-    otpStore.delete(normalizedEmail);
+  // 1. Check memory store
+  const entry = otpStore.get(norm);
+  if (entry && Date.now() <= entry.expiresAt && entry.otp === code) {
+    otpStore.delete(norm);
+    try { await Otp.deleteMany({ target: norm }); } catch (_) {}
     return true;
   }
 
+  // 2. Check MongoDB collection
+  try {
+    const dbEntry = await Otp.findOne({ target: norm, otp: code });
+    if (dbEntry) {
+      await Otp.deleteMany({ target: norm });
+      otpStore.delete(norm);
+      return true;
+    }
+  } catch (err) {
+    console.warn('[otp] MongoDB Otp verification fallback:', err.message);
+  }
+
   return false;
+}
+
+async function sendPhoneOtp(phoneNumber, otp) {
+  const fast2smsKey = (process.env.FAST2SMS_API_KEY || '').trim();
+  const twilioSid = process.env.TWILIO_ACCOUNT_SID;
+  const twilioAuth = process.env.TWILIO_AUTH_TOKEN;
+  const twilioPhone = process.env.TWILIO_PHONE_NUMBER;
+
+  if (fast2smsKey) {
+    try {
+      const cleanPhone = phoneNumber.replace(/[^0-9]/g, '').slice(-10);
+
+      // Method 1: Fast2SMS POST with authorization header (Official API format)
+      try {
+        const postRes = await fetch('https://www.fast2sms.com/dev/bulkV2', {
+          method: 'POST',
+          headers: {
+            'authorization': fast2smsKey,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            route: 'q',
+            message: `Your Boolok AI verification code is ${otp}. Valid for 10 minutes.`,
+            language: 'english',
+            flash: 0,
+            numbers: cleanPhone,
+          }),
+        });
+        const postData = await postRes.json();
+        console.log('[sms] Fast2SMS POST (route=q) response:', postData);
+
+        if (postData && (postData.return === true || postData.status_code === 200)) {
+          return { success: true };
+        }
+      } catch (postErr) {
+        console.warn('[sms] Fast2SMS POST error:', postErr.message);
+      }
+
+      // Method 2: Fast2SMS GET fallback with authorization header
+      const quickUrl = `https://www.fast2sms.com/dev/bulkV2?authorization=${encodeURIComponent(fast2smsKey)}&route=q&message=${encodeURIComponent(`Your Boolok AI verification code is ${otp}. Valid for 10 minutes.`)}&language=english&flash=0&numbers=${cleanPhone}`;
+      const getRes = await fetch(quickUrl, {
+        method: 'GET',
+        headers: {
+          'authorization': fast2smsKey,
+        },
+      });
+      const getData = await getRes.json();
+      console.log('[sms] Fast2SMS GET response:', getData);
+
+      if (getData && (getData.return === true || getData.status_code === 200)) {
+        return { success: true };
+      }
+
+      const errMsg = Array.isArray(getData?.message) ? getData.message.join(', ') : (getData?.message || 'Fast2SMS dispatch failed');
+      return { success: false, reason: errMsg };
+    } catch (e) {
+      console.error('[sms] Fast2SMS network error:', e.message);
+      return { success: false, reason: e.message };
+    }
+  }
+
+  if (twilioSid && twilioAuth && twilioPhone) {
+    try {
+      const twilio = require('twilio');
+      const client = twilio(twilioSid, twilioAuth);
+      const formattedTo = phoneNumber.startsWith('+') ? phoneNumber : `+91${phoneNumber.replace(/[^0-9]/g, '').slice(-10)}`;
+      const message = await client.messages.create({
+        body: `Your Boolok AI verification code is ${otp}. Valid for 10 minutes.`,
+        from: twilioPhone,
+        to: formattedTo,
+      });
+      console.log('[sms] Twilio message sent:', message.sid);
+      return { success: true };
+    } catch (e) {
+      console.error('[sms] Twilio error:', e.message);
+      return { success: false, reason: e.message };
+    }
+  }
+
+  console.error(`[sms] No working SMS provider configured for ${phoneNumber}.`);
+  return { success: false, reason: 'No working SMS gateway configured. Please check FAST2SMS_API_KEY in .env.' };
 }
 
 async function sendOtpEmail(toEmail, otp, purpose = 'Account Access') {
@@ -99,7 +197,7 @@ async function sendOtpEmail(toEmail, otp, purpose = 'Account Access') {
     }
   }
 
-  // ── FALLBACK: Gmail SMTP (for local development) ─────────────────────────
+  // ── FALLBACK: Gmail SMTP ─────────────────────────────────────────
   const gmailUser = (process.env.GMAIL_USER || '').trim();
   const rawPass = (process.env.GMAIL_APP_PASSWORD || process.env.EMAIL_PASS || '').trim();
   const pass = rawPass.replace(/\s+/g, '');
@@ -112,10 +210,10 @@ async function sendOtpEmail(toEmail, otp, purpose = 'Account Access') {
   try {
     const transporter = nodemailer.createTransport({
       service: 'gmail',
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
       auth: { user: gmailUser, pass },
+      tls: {
+        rejectUnauthorized: false,
+      },
     });
 
     const info = await transporter.sendMail({
@@ -126,11 +224,31 @@ async function sendOtpEmail(toEmail, otp, purpose = 'Account Access') {
       html: htmlBody,
     });
 
-    console.log(`[nodemailer] OTP email sent to ${toEmail}: ${info.messageId}`);
+    console.log(`[nodemailer] OTP email sent successfully to ${toEmail}: ${info.messageId}`);
     return true;
   } catch (err) {
-    console.error('[nodemailer] Gmail SMTP error:', err.message);
-    return false;
+    console.error('[nodemailer] Gmail SMTP (service=gmail) error:', err.message, 'Trying port 587 fallback...');
+    try {
+      const fallbackTransporter = nodemailer.createTransport({
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false,
+        auth: { user: gmailUser, pass },
+        tls: { rejectUnauthorized: false },
+      });
+      const info = await fallbackTransporter.sendMail({
+        from: `"Boolok AI" <${gmailUser}>`,
+        to: toEmail,
+        subject: `Your Boolok AI Verification Code: ${otp}`,
+        text: `Your Boolok AI verification code is: ${otp}. This code expires in 10 minutes.`,
+        html: htmlBody,
+      });
+      console.log(`[nodemailer-fallback] OTP email sent to ${toEmail}: ${info.messageId}`);
+      return true;
+    } catch (fallbackErr) {
+      console.error('[nodemailer-fallback] Gmail SMTP error on port 587:', fallbackErr.message);
+      return false;
+    }
   }
 }
 
@@ -170,13 +288,16 @@ function sanitizeUser(user) {
     fullName: user.fullName,
     username: user.username || user.fullName?.replace(/\s+/g, '').toLowerCase() || 'user',
     email: user.email,
+    phoneNumber: user.phoneNumber || null,
+    isPhoneVerified: Boolean(user.isPhoneVerified),
+    isEmailVerified: Boolean(user.isEmailVerified),
     profilePicture: user.profilePicture || null,
     bio: user.bio || '',
     goal: user.goal || null,
   };
 }
 
-// POST /api/auth/send-otp (for user registration verification)
+// POST /api/auth/send-otp (for user email registration verification)
 router.post('/send-otp', async (req, res) => {
   try {
     const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
@@ -186,15 +307,17 @@ router.post('/send-otp', async (req, res) => {
     }
 
     const otp = generateOtp();
-    storeOtp(email, otp);
+    await storeOtp(email, otp, 'email');
 
-    console.log(`[auth] Registration 6-digit OTP generated for ${email}: ${otp}`);
+    console.log(`[auth] Email registration 6-digit OTP for ${email}: ${otp}`);
 
-    // Send real email via Gmail SMTP
+    // Send real email via Gmail SMTP / Resend
     const emailSent = await sendOtpEmail(email, otp, 'Account Registration');
 
-    if (!emailSent && !process.env.GMAIL_APP_PASSWORD) {
-      console.warn(`[auth] Note: GMAIL_APP_PASSWORD is missing in backend/.env.`);
+    if (!emailSent) {
+      return res.status(500).json({
+        message: 'Could not send verification email. Please check your email address or try again.',
+      });
     }
 
     return res.status(200).json({
@@ -204,6 +327,84 @@ router.post('/send-otp', async (req, res) => {
   } catch (error) {
     console.error('Send OTP error:', error);
     return res.status(500).json({ message: 'Failed to send verification email.', error: error.message });
+  }
+});
+
+// POST /api/auth/verify-email-otp
+router.post('/verify-email-otp', async (req, res) => {
+  try {
+    const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const otp = typeof req.body.otp === 'string' ? req.body.otp.trim() : '';
+
+    if (!email || !otp) {
+      return res.status(400).json({ message: 'Email and OTP verification code are required.' });
+    }
+
+    const isValid = await verifyOtpHelper(email, otp);
+    if (!isValid) {
+      return res.status(400).json({ message: 'Invalid or expired email verification code.' });
+    }
+
+    return res.status(200).json({ success: true, verified: true, message: 'Email verified successfully.' });
+  } catch (error) {
+    console.error('Verify email OTP error:', error);
+    return res.status(500).json({ message: 'Email verification failed.', error: error.message });
+  }
+});
+
+// POST /api/auth/send-phone-otp (for mobile number verification)
+router.post('/send-phone-otp', async (req, res) => {
+  try {
+    const rawPhone = req.body.phone || req.body.phoneNumber || '';
+    const phone = typeof rawPhone === 'string' ? rawPhone.trim() : '';
+
+    if (!phone || phone.replace(/[^0-9]/g, '').length < 8) {
+      return res.status(400).json({ message: 'A valid mobile phone number is required.' });
+    }
+
+    const otp = generateOtp();
+    await storeOtp(phone, otp, 'phone');
+
+    console.log(`[auth] Mobile verification 6-digit OTP for ${phone}: ${otp}`);
+
+    const phoneResult = await sendPhoneOtp(phone, otp);
+
+    if (!phoneResult.success) {
+      return res.status(500).json({
+        message: phoneResult.reason || 'Could not dispatch SMS to this mobile number. Please check Fast2SMS balance or gateway.',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `A 6-digit SMS verification code has been sent to ${phone}.`,
+    });
+  } catch (error) {
+    console.error('Send Phone OTP error:', error);
+    return res.status(500).json({ message: 'Failed to send phone OTP.', error: error.message });
+  }
+});
+
+// POST /api/auth/verify-phone-otp
+router.post('/verify-phone-otp', async (req, res) => {
+  try {
+    const rawPhone = req.body.phone || req.body.phoneNumber || '';
+    const phone = typeof rawPhone === 'string' ? rawPhone.trim() : '';
+    const otp = typeof req.body.otp === 'string' ? req.body.otp.trim() : '';
+
+    if (!phone || !otp) {
+      return res.status(400).json({ message: 'Phone number and verification code are required.' });
+    }
+
+    const isValid = await verifyOtpHelper(phone, otp);
+    if (!isValid) {
+      return res.status(400).json({ message: 'Invalid or expired mobile verification code.' });
+    }
+
+    return res.status(200).json({ success: true, verified: true, message: 'Mobile number verified successfully.' });
+  } catch (error) {
+    console.error('Verify phone OTP error:', error);
+    return res.status(500).json({ message: 'Phone verification failed.', error: error.message });
   }
 });
 
@@ -283,8 +484,11 @@ router.post('/register', async (req, res) => {
     const fullName = typeof req.body.fullName === 'string' ? req.body.fullName.trim() : '';
     const rawUsername = typeof req.body.username === 'string' ? req.body.username.trim().toLowerCase() : '';
     const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const rawPhone = req.body.phoneNumber || req.body.phone || '';
+    const phoneNumber = typeof rawPhone === 'string' ? rawPhone.trim() : '';
     const password = typeof req.body.password === 'string' ? req.body.password : '';
-    const otp = typeof req.body.otp === 'string' ? req.body.otp.trim() : '';
+    const emailOtp = typeof req.body.emailOtp === 'string' ? req.body.emailOtp.trim() : (typeof req.body.otp === 'string' ? req.body.otp.trim() : '');
+    const phoneOtp = typeof req.body.phoneOtp === 'string' ? req.body.phoneOtp.trim() : '';
 
     if (!fullName || !email || !password) {
       return res.status(400).json({ message: 'Full name, email and password are required.' });
@@ -294,17 +498,35 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ message: 'Password must contain at least 8 characters.' });
     }
 
-    // If OTP was provided, verify it (or allow if valid)
-    if (otp) {
-      const isOtpValid = verifyOtpHelper(email, otp);
-      if (!isOtpValid) {
-        return res.status(400).json({ message: 'Invalid or expired verification code.' });
+    // Verify Email OTP (only if not already verified via verify-email-otp)
+    let isEmailVerified = Boolean(req.body.isEmailVerified);
+    if (!isEmailVerified && emailOtp) {
+      const isEmailOtpValid = await verifyOtpHelper(email, emailOtp);
+      if (!isEmailOtpValid) {
+        return res.status(400).json({ message: 'Invalid or expired email verification code.' });
+      }
+      isEmailVerified = true;
+    }
+
+    // Mobile Phone OTP verification (Optional / ready to activate when SMS API key is configured)
+    let isPhoneVerified = Boolean(req.body.isPhoneVerified);
+    if (phoneNumber && phoneOtp) {
+      const isPhoneOtpValid = await verifyOtpHelper(phoneNumber, phoneOtp);
+      if (isPhoneOtpValid) {
+        isPhoneVerified = true;
       }
     }
 
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(409).json({ message: 'An account already exists with this email.' });
+    }
+
+    if (phoneNumber) {
+      const existingPhone = await User.findOne({ phoneNumber });
+      if (existingPhone) {
+        return res.status(409).json({ message: 'An account already exists with this mobile number.' });
+      }
     }
 
     const username = rawUsername || fullName.replace(/\s+/g, '').toLowerCase();
@@ -319,6 +541,9 @@ router.post('/register', async (req, res) => {
       fullName,
       username: finalUsername,
       email,
+      phoneNumber: phoneNumber || null,
+      isEmailVerified,
+      isPhoneVerified,
       password: passwordHash,
       authProvider: 'local',
       profilePicture: null,
@@ -401,7 +626,6 @@ router.post('/forgot-password', async (req, res) => {
       message: `A 6-digit password reset code has been sent to ${email}.`,
       success: true,
       email,
-      ...(process.env.NODE_ENV !== 'production' ? { debugOtp: otp } : {}),
     });
   } catch (error) {
     console.error('Forgot password error:', error);

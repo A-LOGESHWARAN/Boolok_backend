@@ -26,6 +26,20 @@ const userSchema = new mongoose.Schema(
       required: true,
       select: false,
     },
+    phoneNumber: {
+      type: String,
+      trim: true,
+      default: null,
+      sparse: true,
+    },
+    isPhoneVerified: {
+      type: Boolean,
+      default: false,
+    },
+    isEmailVerified: {
+      type: Boolean,
+      default: false,
+    },
     authProvider: {
       type: String,
       enum: ['local', 'google'],

@@ -1640,8 +1640,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
       Reel.find({
         $or: [
           { author: profileUser._id },
-          ...(profileUser.fullName ? [{ authorName: profileUser.fullName }] : []),
-          ...(profileUser.username ? [{ authorName: profileUser.username }] : []),
+          ...(profileUser.username ? [{ author: null, authorName: profileUser.username }] : []),
         ],
       })
         .populate('author', 'fullName username profilePicture')
@@ -1698,14 +1697,6 @@ router.get('/:id', optionalAuth, async (req, res) => {
     // For non-self community profiles with 0 posts in DB, allow community fallback
     if (!sanitized.isSelf && userPosts.length === 0) {
       userPosts = COMMUNITY_POSTS_MAP[usernameKey] || [];
-      if (userPosts.length === 0) {
-        for (const [k, pList] of Object.entries(COMMUNITY_POSTS_MAP)) {
-          if (usernameKey.includes(k) || k.includes(usernameKey)) {
-            userPosts = pList;
-            break;
-          }
-        }
-      }
     }
 
     const formattedReels = (dbReels || []).map((r) => {
@@ -1754,20 +1745,13 @@ router.get('/:id', optionalAuth, async (req, res) => {
     });
 
     let userReels = formattedReels;
-    if (userReels.length === 0) {
-      if (usernameKey === 'logeshwarana' || usernameKey.includes('logeshwaran')) {
+    // Only static seeded demo accounts show demo showcase reels if non-self and has 0 DB reels
+    if (!sanitized.isSelf && userReels.length === 0) {
+      if (usernameKey === 'logeshwarana') {
         userReels = LOGESHWARAN_REELS;
-      } else if (sanitized.isSelf || usernameKey.includes('sai') || usernameKey === 'saivimenthanvl') {
+      } else if (usernameKey === 'saivimenthanvl') {
         userReels = SAI_REELS;
       }
-    } else {
-      const sampleReels = usernameKey.includes('logesh') ? LOGESHWARAN_REELS : SAI_REELS;
-      const seenReelIds = new Set(userReels.map((r) => r._id));
-      sampleReels.forEach((sr) => {
-        if (!seenReelIds.has(sr._id)) {
-          userReels.push(sr);
-        }
-      });
     }
 
     return res.status(200).json({
