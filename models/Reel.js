@@ -1,41 +1,48 @@
 const mongoose = require('mongoose');
 
-const reelSchema = new mongoose.Schema({
-  author: {
+const commentSchema = new mongoose.Schema({
+  user: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,
   },
-  videoUrl: {
+  text: {
     type: String,
+    trim: true,
     required: true,
+    maxlength: 1000,
   },
-  thumbnail: { type: String },
-  poster: { type: String },
-  caption: { type: String },
-  title: { type: String },
-  authorName: { type: String },
-  location: { type: String },
-  aiMatch: { type: Number },
-  insight: { type: String },
-  views: { type: Number, default: 0 },
-  likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-  comments: [
-    {
-      user: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User',
-      },
-      text: {
-        type: String,
-        trim: true,
-      },
-      createdAt: {
-        type: Date,
-        default: Date.now,
-      },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+});
+
+const reelSchema = new mongoose.Schema(
+  {
+    author: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true,
+      index: true,
     },
-  ],
-}, { timestamps: true });
+    videoUrl: { type: String, required: true, trim: true },
+    thumbnail: { type: String, trim: true },
+    poster: { type: String, trim: true },
+    caption: { type: String, trim: true, maxlength: 2200 },
+    title: { type: String, trim: true, maxlength: 150 },
+    authorName: { type: String, trim: true, maxlength: 100 },
+    location: { type: String, trim: true, maxlength: 150 },
+    aiMatch: { type: Number, min: 0, max: 100 },
+    insight: { type: String, trim: true, maxlength: 500 },
+    views: { type: Number, default: 0, min: 0 },
+    likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    comments: [commentSchema],
+  },
+  { timestamps: true }
+);
+
+// Feed query sorts newest-first
+reelSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model('Reel', reelSchema);

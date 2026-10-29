@@ -8,9 +8,25 @@ const Reel = require('../models/Reel');
 const auth = require('../middleware/auth');
 const optionalAuth = require('../middleware/optionalAuth');
 
-// ── Multer storage: save uploaded video files to /uploads/reels/ ────────────
+// ── Storage ──────────────────────────────────────────────────────────────────
+// NOTE: local disk is wiped on every redeploy/restart on hosts like Render's free
+// tier. Videos uploaded here will disappear while their DB records stay. For reels
+// that must survive, move uploads to Cloudinary / S3 / Supabase Storage and store
+// the returned HTTPS URL in `videoUrl`.
 const uploadDir = path.join(__dirname, '..', 'uploads', 'reels');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+
+const VIDEO_EXTS = ['.mp4', '.mov', '.webm', '.m4v', '.mkv', '.avi'];
+const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
+
+const CONTENT_TYPES = {
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.mkv': 'video/x-matroska',
+  '.avi': 'video/x-msvideo',
+};
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => {
@@ -19,34 +35,61 @@ const storage = multer.diskStorage({
   },
   filename: (_req, file, cb) => {
     const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    let rawExt = path.extname(file.originalname || '').toLowerCase().replace(/[^a-z0-9.]/g, '');
-    if (!rawExt || rawExt.length > 5 || rawExt.includes('/')) {
-      rawExt = (file.mimetype && file.mimetype.startsWith('image/')) ? '.jpg' : '.mp4';
+    let ext = path.extname(file.originalname || '').toLowerCase().replace(/[^a-z0-9.]/g, '');
+    if (!ext || ext.length > 6) {
+      ext = file.mimetype && file.mimetype.startsWith('image/') ? '.jpg' : '.mp4';
     }
-    cb(null, `${unique}${rawExt}`);
+    cb(null, `${unique}${ext}`);
   },
 });
 
 const upload = multer({
   storage,
-  limits: { fileSize: 200 * 1024 * 1024 }, // 200 MB
+  limits: { fileSize: 200 * 1024 * 1024, files: 3 }, // 200 MB per file
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname || '').toLowerCase();
-    const isVideoExt = ['.mp4', '.mov', '.webm', '.m4v', '.mkv', '.avi'].includes(ext);
-    const isImageExt = ['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext);
-    const isMediaMime =
-      !file.mimetype ||
-      file.mimetype.startsWith('video/') ||
-      file.mimetype.startsWith('image/') ||
-      file.mimetype === 'application/octet-stream';
-
-    if (isMediaMime || isVideoExt || isImageExt) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only video and image files are allowed'));
-    }
+    const mime = file.mimetype || '';
+    const ok =
+      mime.startsWith('video/') ||
+      mime.startsWith('image/') ||
+      VIDEO_EXTS.includes(ext) ||
+      IMAGE_EXTS.includes(ext);
+    if (ok) cb(null, true);
+    else cb(new Error('Only video and image files are allowed'));
   },
 });
+
+const handleMulterUpload = (req, res, next) => {
+  upload.any()(req, res, (err) => {
+    if (err) {
+      console.error('[reels] Multer error:', err.message);
+      const message =
+        err.code === 'LIMIT_FILE_SIZE'
+          ? 'Video is too large. Maximum size is 200 MB.'
+          : err.message || 'Video upload failed. Check the file size (<200MB) and format.';
+      return res.status(400).json({ message });
+    }
+    next();
+  });
+};
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const removeUploadedFiles = (files) => {
+  (files || []).forEach((f) => {
+    if (f && f.path) fs.unlink(f.path, () => {});
+  });
+};
+
+// Delete a stored file only if it lives inside our uploads dir (no path traversal)
+const removeStoredMedia = (url) => {
+  if (!url || typeof url !== 'string') return;
+  const m = url.match(/\/uploads\/reels\/([^/?#]+)/);
+  if (!m) return;
+  const filePath = path.join(uploadDir, path.basename(m[1]));
+  fs.unlink(filePath, (err) => {
+    if (err && err.code !== 'ENOENT') console.warn('Could not delete media file:', err.message);
+  });
+};
 
 const PLACEHOLDER_INSIGHTS = [
   'High buyer interest predicted based on comparable listings in this area.',
@@ -62,55 +105,55 @@ function generatePlaceholderAnalysis() {
   return { aiMatch, insight };
 }
 
+const mapUser = (u) => ({
+  _id: u?._id || u?.id || null,
+  fullName: u?.fullName || 'Boolok Member',
+  username: u?.username || 'member',
+  profilePicture: u?.profilePicture || null,
+});
+
+const mapComment = (c) => {
+  const createdDate = c.createdAt || new Date();
+  const user = mapUser(c.user || {});
+  return {
+    _id: c._id,
+    user,
+    author: user,
+    text: c.text,
+    createdAt: createdDate,
+    time: new Date(createdDate).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    date: new Date(createdDate).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }),
+  };
+};
+
 const formatReel = (reel, viewerId = null) => {
   const r = reel.toObject ? reel.toObject() : reel;
   const likesArray = (r.likes || []).map((l) => (l?._id ? l._id.toString() : String(l)));
   const isLiked = viewerId ? likesArray.includes(viewerId.toString()) : false;
-
-  const comments = (r.comments || []).map((c) => {
-    const u = c.user || {};
-    const createdDate = c.createdAt || new Date();
-    return {
-      _id: c._id,
-      user: {
-        _id: u._id || u.id || null,
-        fullName: u.fullName || 'Boolok Member',
-        username: u.username || 'member',
-        profilePicture: u.profilePicture || null,
-      },
-      author: {
-        _id: u._id || u.id || null,
-        fullName: u.fullName || 'Boolok Member',
-        username: u.username || 'member',
-        profilePicture: u.profilePicture || null,
-      },
-      text: c.text,
-      createdAt: createdDate,
-      time: new Date(createdDate).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      date: new Date(createdDate).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }),
-    };
-  });
+  const comments = (r.comments || []).map(mapComment);
 
   const poster = r.poster || r.thumbnail || null;
   const thumbnail = r.thumbnail || r.poster || null;
-
   const authorDisplayName = r.authorName || r.author?.fullName || 'Boolok Member';
+
+  const authorObj = r.author && r.author._id
+    ? {
+        _id: r.author._id.toString(),
+        fullName: authorDisplayName,
+        username: r.author.username || 'member',
+        profilePicture: r.author.profilePicture || null,
+      }
+    : {
+        // author not populated (plain ObjectId) or user deleted
+        _id: r.author ? r.author.toString() : null,
+        fullName: authorDisplayName,
+        username: 'member',
+        profilePicture: null,
+      };
 
   return {
     _id: r._id.toString(),
-    author: r.author
-      ? {
-          _id: r.author._id?.toString() || r.author.id?.toString(),
-          fullName: authorDisplayName,
-          username: r.author.username || 'member',
-          profilePicture: r.author.profilePicture || null,
-        }
-      : {
-          _id: null,
-          fullName: authorDisplayName,
-          username: 'member',
-          profilePicture: null,
-        },
+    author: authorObj,
     videoUrl: r.videoUrl,
     poster,
     thumbnail,
@@ -130,87 +173,98 @@ const formatReel = (reel, viewerId = null) => {
   };
 };
 
-// ── Multer error handling middleware ─────────────────────────────────────────
-const handleMulterUpload = (req, res, next) => {
-  upload.any()(req, res, (err) => {
-    if (err) {
-      console.error('[reels] Multer error:', err.message);
-      return res.status(400).json({
-        message: err.message || 'Video upload failed. Check the file size (<200MB) and format.',
-      });
-    }
-    next();
-  });
-};
+// Parse a single "Range: bytes=..." header. Returns {start,end} or null if unsatisfiable.
+function parseRange(header, size) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(header).trim());
+  if (!m || (m[1] === '' && m[2] === '')) return null;
 
-// ── GET /api/reels/stream/:filename : Stream video with HTTP 206 Range support ──
-router.get('/stream/:filename', (req, res) => {
-  try {
-    const filename = path.basename(req.params.filename);
-    const filePath = path.join(uploadDir, filename);
-
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Accept-Ranges', 'bytes');
-
-    if (!fs.existsSync(filePath)) {
-      // If the file has been purged by Render's ephemeral disk restart,
-      // redirect safely to high-availability demo architectural video
-      return res.redirect('https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4');
-    }
-
-    const stat = fs.statSync(filePath);
-    const fileSize = stat.size;
-    const range = req.headers.range;
-
-    let contentType = 'video/mp4';
-    const ext = path.extname(filename).toLowerCase();
-    if (ext === '.webm') contentType = 'video/webm';
-    else if (ext === '.mov') contentType = 'video/quicktime';
-
-    if (range) {
-      const parts = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-
-      if (start >= fileSize) {
-        res.status(416).send('Requested range not satisfiable\n' + start + ' >= ' + fileSize);
-        return;
-      }
-
-      const chunksize = end - start + 1;
-      const file = fs.createReadStream(filePath, { start, end });
-      res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunksize,
-        'Content-Type': contentType,
-      });
-      file.pipe(res);
-    } else {
-      res.writeHead(200, {
-        'Content-Length': fileSize,
-        'Content-Type': contentType,
-      });
-      fs.createReadStream(filePath).pipe(res);
-    }
-  } catch (streamErr) {
-    console.error('[reels] Stream error:', streamErr);
-    if (!res.headersSent) {
-      res.status(500).json({ message: 'Failed to stream video', error: streamErr.message });
-    }
+  let start;
+  let end;
+  if (m[1] === '') {
+    // suffix range: last N bytes
+    const suffix = parseInt(m[2], 10);
+    if (!suffix) return null;
+    start = Math.max(size - suffix, 0);
+    end = size - 1;
+  } else {
+    start = parseInt(m[1], 10);
+    end = m[2] === '' ? size - 1 : Math.min(parseInt(m[2], 10), size - 1);
   }
+  if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= size) return null;
+  return { start, end };
+}
+
+// ── GET /api/reels/stream/:filename : Video streaming with HTTP 206 ranges ───
+router.get('/stream/:filename', async (req, res) => {
+  const filename = path.basename(req.params.filename);
+  const filePath = path.join(uploadDir, filename);
+
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length');
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+
+  let stat;
+  try {
+    stat = await fs.promises.stat(filePath);
+  } catch (_) {
+    // File is gone (e.g. host disk was wiped). Report it honestly so the app can
+    // show a proper "couldn't load" state instead of silently playing a different video.
+    return res.status(404).json({ message: 'Video file not found' });
+  }
+
+  const fileSize = stat.size;
+  const ext = path.extname(filename).toLowerCase();
+  const contentType = CONTENT_TYPES[ext] || 'video/mp4';
+  const rangeHeader = req.headers.range;
+
+  let status = 200;
+  let start = 0;
+  let end = fileSize - 1;
+
+  // Multi-range requests are rare; serve the whole file for those.
+  if (rangeHeader && !rangeHeader.includes(',')) {
+    const range = parseRange(rangeHeader, fileSize);
+    if (!range) {
+      res.setHeader('Content-Range', `bytes */${fileSize}`);
+      return res.status(416).end();
+    }
+    ({ start, end } = range);
+    status = 206;
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+  }
+
+  res.status(status);
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Content-Length', end - start + 1);
+
+  if (req.method === 'HEAD' || fileSize === 0) return res.end();
+
+  const stream = fs.createReadStream(filePath, { start, end });
+  stream.on('error', (err) => {
+    console.error('[reels] Stream read error:', err.message);
+    if (!res.headersSent) res.status(500).end();
+    else res.destroy();
+  });
+  // Stop reading when the player seeks/aborts, otherwise file handles leak
+  res.on('close', () => stream.destroy());
+  stream.pipe(res);
 });
 
-// ── GET /api/reels : Fetch all reels ─────────────────────────────────────────
+// ── GET /api/reels : Fetch reels (supports ?limit=&skip=) ───────────────────
 router.get('/', optionalAuth, async (req, res) => {
   try {
     const viewerId = req.user?.id || req.user?._id || null;
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
+    const skip = Math.max(parseInt(req.query.skip, 10) || 0, 0);
+
     const reels = await Reel.find()
       .populate('author', 'fullName username profilePicture')
       .populate('comments.user', 'fullName username profilePicture')
       .sort({ createdAt: -1 })
-      .limit(50);
+      .skip(skip)
+      .limit(limit);
 
     res.json(reels.map((r) => formatReel(r, viewerId)));
   } catch (error) {
@@ -221,39 +275,33 @@ router.get('/', optionalAuth, async (req, res) => {
 
 // ── POST /api/reels : Create a new reel ──────────────────────────────────────
 router.post('/', auth, handleMulterUpload, async (req, res) => {
+  const files = req.files || (req.file ? [req.file] : []);
   try {
-    const files = req.files || (req.file ? [req.file] : []);
-    console.log(`[reels] Upload request from user ${req.user?.id}, received ${files.length} file(s)`);
+    const isVideoFile = (f) =>
+      (f.mimetype && f.mimetype.startsWith('video/')) ||
+      VIDEO_EXTS.includes(path.extname(f.originalname || '').toLowerCase());
+    const isImageFile = (f) =>
+      (f.mimetype && f.mimetype.startsWith('image/')) ||
+      IMAGE_EXTS.includes(path.extname(f.originalname || '').toLowerCase());
 
-    const videoFile = files.find(
-      (f) =>
-        f.fieldname === 'video' ||
-        f.fieldname === 'file' ||
-        (f.mimetype && f.mimetype.startsWith('video/')) ||
-        (f.originalname && /\.(mp4|mov|webm|m4v|mkv|avi)$/i.test(f.originalname)) ||
-        (files.length === 1 && (!f.mimetype || !f.mimetype.startsWith('image/')))
-    );
-
-    const thumbFile = files.find(
-      (f) =>
-        f !== videoFile &&
-        (f.fieldname === 'thumbnail' ||
-          f.fieldname === 'poster' ||
-          (f.mimetype && f.mimetype.startsWith('image/')) ||
-          (f.originalname && /\.(jpg|jpeg|png|webp)$/i.test(f.originalname)))
-    );
+    const videoFile =
+      files.find((f) => f.fieldname === 'video' && !isImageFile(f)) ||
+      files.find(isVideoFile) ||
+      null;
+    const thumbFile = files.find((f) => f !== videoFile && isImageFile(f)) || null;
 
     let videoUrl = null;
     if (videoFile) {
       videoUrl = `/uploads/reels/${videoFile.filename}`;
-    } else if (typeof req.body.videoUrl === 'string' && req.body.videoUrl.trim()) {
+    } else if (typeof req.body.videoUrl === 'string' && /^https?:\/\//i.test(req.body.videoUrl.trim())) {
       videoUrl = req.body.videoUrl.trim();
-    } else if (typeof req.body.video === 'string' && req.body.video.trim()) {
-      videoUrl = req.body.video.trim();
     } else {
-      console.warn('[reels] Missing video. Body:', Object.keys(req.body));
+      removeUploadedFiles(files); // don't leave an orphan cover image behind
       return res.status(400).json({ message: 'A video file or video URL is required.' });
     }
+
+    // Unused extra files (anything that is neither the chosen video nor cover)
+    removeUploadedFiles(files.filter((f) => f !== videoFile && f !== thumbFile));
 
     let thumbnail = null;
     if (thumbFile) {
@@ -267,32 +315,35 @@ router.post('/', auth, handleMulterUpload, async (req, res) => {
     const { caption, title, location, authorName } = req.body;
     const placeholder = generatePlaceholderAnalysis();
 
+    let aiMatch = Number(req.body.aiMatch);
+    aiMatch = Number.isFinite(aiMatch) && aiMatch >= 0 && aiMatch <= 100 ? Math.round(aiMatch) : placeholder.aiMatch;
+
     const newReel = new Reel({
       author: req.user.id,
       videoUrl,
-      thumbnail: thumbnail || null,
-      poster: thumbnail || null,
-      caption: caption ? String(caption).trim() : '',
-      title: title ? String(title).trim() : '',
-      authorName: authorName ? String(authorName).trim() : '',
-      location: location ? String(location).trim() : '',
-      aiMatch: req.body.aiMatch ? Number(req.body.aiMatch) : placeholder.aiMatch,
-      insight: req.body.insight ? String(req.body.insight).trim() : placeholder.insight,
+      thumbnail,
+      poster: thumbnail,
+      caption: caption ? String(caption).trim().slice(0, 2200) : '',
+      title: title ? String(title).trim().slice(0, 150) : '',
+      authorName: authorName ? String(authorName).trim().slice(0, 100) : '',
+      location: location ? String(location).trim().slice(0, 150) : '',
+      aiMatch,
+      insight: req.body.insight ? String(req.body.insight).trim().slice(0, 500) : placeholder.insight,
       likes: [],
       comments: [],
     });
 
     const savedReel = await newReel.save();
     await savedReel.populate('author', 'fullName username profilePicture');
-    console.log(`[reels] Successfully created reel: ${savedReel._id}`);
     res.status(201).json(formatReel(savedReel, req.user.id));
   } catch (error) {
     console.error('CREATE REEL ERROR:', error);
+    removeUploadedFiles(files); // DB save failed -> don't keep orphaned uploads
     res.status(500).json({ message: 'Server error creating reel', error: error.message });
   }
 });
 
-// ── PUT /api/reels/:id/like : Toggle like on a reel ─────────────────────────
+// ── PUT /api/reels/:id/like : Toggle like (atomic, no read-then-write race) ──
 router.put('/:id/like', auth, async (req, res) => {
   try {
     const userId = req.user.id;
@@ -300,18 +351,25 @@ router.put('/:id/like', auth, async (req, res) => {
       return res.status(400).json({ message: 'Invalid reel ID' });
     }
 
-    const reel = await Reel.findById(req.params.id);
-    if (!reel) return res.status(404).json({ message: 'Reel not found' });
+    // Try to un-like first; if nothing matched, like it.
+    let updated = await Reel.findOneAndUpdate(
+      { _id: req.params.id, likes: userId },
+      { $pull: { likes: userId } },
+      { new: true }
+    );
+    if (!updated) {
+      updated = await Reel.findOneAndUpdate(
+        { _id: req.params.id },
+        { $addToSet: { likes: userId } },
+        { new: true }
+      );
+    }
+    if (!updated) return res.status(404).json({ message: 'Reel not found' });
 
-    const alreadyLiked = reel.likes.some((id) => id.toString() === userId.toString());
-    const update = alreadyLiked
-      ? { $pull: { likes: userId } }
-      : { $addToSet: { likes: userId } };
-
-    const updated = await Reel.findByIdAndUpdate(req.params.id, update, { new: true })
-      .populate('author', 'fullName username profilePicture')
-      .populate('comments.user', 'fullName username profilePicture');
-
+    await updated.populate([
+      { path: 'author', select: 'fullName username profilePicture' },
+      { path: 'comments.user', select: 'fullName username profilePicture' },
+    ]);
     res.json(formatReel(updated, userId));
   } catch (error) {
     console.error('LIKE REEL ERROR:', error);
@@ -319,79 +377,48 @@ router.put('/:id/like', auth, async (req, res) => {
   }
 });
 
-// ── POST /api/reels/:id/comments : Add comment to a reel ────────────────────
+// ── POST /api/reels/:id/comments : Add comment ──────────────────────────────
 router.post('/:id/comments', auth, async (req, res) => {
   try {
-    const { text } = req.body;
-    if (!text || !text.trim()) {
-      return res.status(400).json({ message: 'Comment text is required.' });
-    }
+    const text = typeof req.body.text === 'string' ? req.body.text.trim() : '';
+    if (!text) return res.status(400).json({ message: 'Comment text is required.' });
+    if (text.length > 1000) return res.status(400).json({ message: 'Comment is too long (max 1000 characters).' });
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ message: 'Invalid reel ID' });
     }
 
-    const reel = await Reel.findById(req.params.id);
-    if (!reel) return res.status(404).json({ message: 'Reel not found.' });
-
-    reel.comments.push({
-      user: req.user.id,
-      text: text.trim(),
-      createdAt: new Date(),
-    });
-
-    await reel.save();
-    const populated = await Reel.findById(req.params.id)
+    const updated = await Reel.findByIdAndUpdate(
+      req.params.id,
+      { $push: { comments: { user: req.user.id, text, createdAt: new Date() } } },
+      { new: true }
+    )
       .populate('author', 'fullName username profilePicture')
       .populate('comments.user', 'fullName username profilePicture');
 
-    res.status(201).json(formatReel(populated, req.user.id));
+    if (!updated) return res.status(404).json({ message: 'Reel not found.' });
+    res.status(201).json(formatReel(updated, req.user.id));
   } catch (error) {
     console.error('ADD REEL COMMENT ERROR:', error);
     res.status(500).json({ message: 'Server error adding comment.' });
   }
 });
 
-// ── GET /api/reels/:id/comments : Get comments for a reel ───────────────────
+// ── GET /api/reels/:id/comments ─────────────────────────────────────────────
 router.get('/:id/comments', optionalAuth, async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ message: 'Invalid reel ID' });
     }
-    const reel = await Reel.findById(req.params.id)
-      .populate('comments.user', 'fullName username profilePicture');
+    const reel = await Reel.findById(req.params.id).populate('comments.user', 'fullName username profilePicture');
     if (!reel) return res.status(404).json({ message: 'Reel not found.' });
-
-    const comments = (reel.comments || []).map((c) => {
-      const u = c.user || {};
-      const createdDate = c.createdAt || new Date();
-      return {
-        _id: c._id,
-        user: {
-          _id: u._id || u.id || null,
-          fullName: u.fullName || 'Boolok Member',
-          username: u.username || 'member',
-          profilePicture: u.profilePicture || null,
-        },
-        author: {
-          _id: u._id || u.id || null,
-          fullName: u.fullName || 'Boolok Member',
-          username: u.username || 'member',
-          profilePicture: u.profilePicture || null,
-        },
-        text: c.text,
-        createdAt: createdDate,
-        time: new Date(createdDate).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        date: new Date(createdDate).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }),
-      };
-    });
-    res.json(comments);
+    res.json((reel.comments || []).map((c) => mapComment(c.toObject ? c.toObject() : c)));
   } catch (error) {
     console.error('GET REEL COMMENTS ERROR:', error);
     res.status(500).json({ message: 'Server error fetching comments.' });
   }
 });
 
-// ── DELETE /api/reels/:id : Delete a reel ───────────────────────────────────
+// ── DELETE /api/reels/:id : Delete a reel (owner or admin only) ─────────────
 router.delete('/:id', auth, async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -400,14 +427,15 @@ router.delete('/:id', auth, async (req, res) => {
     const reel = await Reel.findById(req.params.id);
     if (!reel) return res.status(404).json({ message: 'Reel not found' });
 
-    if (reel.videoUrl && reel.videoUrl.startsWith('/uploads/')) {
-      const filePath = path.join(__dirname, '..', reel.videoUrl);
-      fs.unlink(filePath, (err) => {
-        if (err && err.code !== 'ENOENT') {
-          console.warn('Could not delete video file:', err.message);
-        }
-      });
+    const isOwner = reel.author && reel.author.toString() === String(req.user.id);
+    const isAdmin = req.user.role === 'admin';
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ message: 'You can only delete your own reels' });
     }
+
+    removeStoredMedia(reel.videoUrl);
+    removeStoredMedia(reel.thumbnail);
+    if (reel.poster !== reel.thumbnail) removeStoredMedia(reel.poster);
 
     await reel.deleteOne();
     res.json({ message: 'Reel deleted successfully' });
